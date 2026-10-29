@@ -1,0 +1,136 @@
+---
+- name: Apache, MOTD and node_exporter
+  hosts: servers
+  become: true
+  vars_files:
+    - config.yaml
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Install Apache
+      ansible.builtin.package:
+        name: "{{ web.package[ansible_os_family] }}"
+        state: present
+
+    - name: Create index page
+      ansible.builtin.copy:
+        dest: /var/www/html/index.html
+        content: "<h1>Final Exam - {{ inventory_hostname }}</h1>\n"
+
+    - name: Start Apache
+      ansible.builtin.service:
+        name: "{{ web.service[ansible_os_family] }}"
+        state: started
+        enabled: true
+
+    - name: Change MOTD
+      ansible.builtin.copy:
+        dest: /etc/motd
+        content: "Ansible Managed by {{ user_motd }}\n"
+
+    - name: Open ports on CentOS
+      ansible.posix.firewalld:
+        port: "{{ item }}/tcp"
+        permanent: true
+        immediate: true
+        state: enabled
+      loop: [80, 9100]
+      when: ansible_os_family == "RedHat"
+      ignore_errors: true
+
+    - name: Download and extract node_exporter
+      ansible.builtin.unarchive:
+        src: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter.version }}/node_exporter-{{ node_exporter.version }}.linux-amd64.tar.gz"
+        dest: /tmp
+        remote_src: true
+
+    - name: Copy node_exporter binary
+      ansible.builtin.copy:
+        src: "/tmp/node_exporter-{{ node_exporter.version }}.linux-amd64/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        mode: "0755"
+        remote_src: true
+
+    - name: Fix SELinux label on CentOS
+      ansible.builtin.command: restorecon /usr/local/bin/node_exporter
+      when: ansible_os_family == "RedHat"
+      failed_when: false
+
+    - name: Create node_exporter service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/local/bin/node_exporter
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: started
+        enabled: true
+        daemon_reload: true
+
+- name: Prometheus server
+  hosts: server_monitoring
+  become: true
+  vars_files:
+    - config.yaml
+
+  tasks:
+    - name: Download Prometheus
+      ansible.builtin.get_url:
+        url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus.version }}/prometheus-{{ prometheus.version }}.linux-amd64.tar.gz"
+        dest: /tmp/prometheus.tar.gz
+        timeout: 600
+
+    - name: Extract Prometheus
+      ansible.builtin.unarchive:
+        src: /tmp/prometheus.tar.gz
+        dest: /tmp
+        remote_src: true
+
+    - name: Copy Prometheus binary
+      ansible.builtin.copy:
+        src: "/tmp/prometheus-{{ prometheus.version }}.linux-amd64/prometheus"
+        dest: /usr/local/bin/prometheus
+        mode: "0755"
+        remote_src: true
+
+    - name: Create Prometheus config
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: /etc/prometheus.yml
+
+    - name: Create Prometheus service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/local/bin/prometheus --config.file=/etc/prometheus.yml --storage.tsdb.path=/var/lib/prometheus
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: started
+        enabled: true
+        daemon_reload: true
